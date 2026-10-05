@@ -1,3 +1,5 @@
+/* rpi_pico/rp2040/w */
+
 / {
     aliases {
         ethernet0 = &ethernet;
