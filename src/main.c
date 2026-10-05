@@ -20,6 +20,7 @@
 #include <zephyr/net/mqtt.h>
 #include <zephyr/net/net_ip.h>
 #include <zephyr/random/random.h>
+#include <zephyr/drivers/hwinfo.h>
 #include <string.h>
 #include <errno.h>
 
@@ -37,7 +38,6 @@ LOG_MODULE_REGISTER(eth_stress, LOG_LEVEL_INF);
 /* MQTT broker */
 #define MQTT_BROKER_HOST   "broker.emqx.io"   /* Replace with the MQTT broker IP */
 #define MQTT_BROKER_PORT   1883
-#define MQTT_CLIENT_ID     __DATE__ "" __TIME__
 #define MQTT_TOPIC_SUB     "stress/test"
 #define MQTT_TOPIC_PUB     "stress/data"
 #define MQTT_PUB_INTERVAL  1000   /* ms between publishes */
@@ -64,6 +64,7 @@ static struct sockaddr_storage mqtt_broker;
 static uint8_t mqtt_rx_buffer[MQTT_RX_BUF_SIZE];
 static uint8_t mqtt_tx_buffer[MQTT_TX_BUF_SIZE];
 static bool mqtt_connected = false;
+static char mqtt_client_id[64];
 
 /* ========================================================================== */
 /*  Network event callback                                                    */
@@ -301,6 +302,24 @@ static void mqtt_evt_handler(struct mqtt_client *const client,
     }
 }
 
+static void build_client_id(char *buff_client_id, size_t buff_len)
+{
+    uint8_t id[16];
+    ssize_t len = hwinfo_get_device_id(id, sizeof(id));
+    size_t i = 0;
+
+    const char *prefix = "zephyr_stress_";
+    while (*prefix && i < buff_len - 1) {
+        buff_client_id[i++] = *prefix++;
+    }
+
+    for (ssize_t k = 0; k < len && i < buff_len - 3; k++) {
+        i += snprintk(&buff_client_id[i],
+                      buff_len - i, "%02X", id[k]);
+    }
+    buff_client_id[i] = '\0';
+}
+
 static int mqtt_connect_broker(void)
 {
     int ret;
@@ -326,11 +345,13 @@ static int mqtt_connect_broker(void)
     memcpy(&mqtt_broker, res->ai_addr, res->ai_addrlen);
     zsock_freeaddrinfo(res);
 
+    build_client_id(mqtt_client_id, sizeof(mqtt_client_id));
+
     /* Initialize the MQTT client */
     mqtt_client_init(&mqtt_client);
     mqtt_client.evt_cb         = mqtt_evt_handler;
-    mqtt_client.client_id.utf8 = MQTT_CLIENT_ID;
-    mqtt_client.client_id.size = strlen(MQTT_CLIENT_ID);
+    mqtt_client.client_id.utf8 = mqtt_client_id;
+    mqtt_client.client_id.size = strlen(mqtt_client_id);
     mqtt_client.rx_buf         = mqtt_rx_buffer;
     mqtt_client.rx_buf_size    = sizeof(mqtt_rx_buffer);
     mqtt_client.tx_buf         = mqtt_tx_buffer;
