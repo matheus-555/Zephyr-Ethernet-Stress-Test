@@ -30,14 +30,14 @@ LOG_MODULE_REGISTER(eth_stress, LOG_LEVEL_INF);
 /* ========================================================================== */
 
 /* Target HTTP server (e.g., a local or public web server) */
-#define HTTP_SERVER_HOST   "google.com"   /* Replace with the HTTP server IP */
+#define HTTP_SERVER_HOST   "viacep.com.br"   /* Replace with the HTTP server IP */
 #define HTTP_SERVER_PORT   80
-#define HTTP_PATH          "/"
+#define HTTP_PATH          "/ws/01001000/json/"
 
 /* MQTT broker */
 #define MQTT_BROKER_HOST   "broker.emqx.io"   /* Replace with the MQTT broker IP */
 #define MQTT_BROKER_PORT   1883
-#define MQTT_CLIENT_ID     "zephyr_stress_client"
+#define MQTT_CLIENT_ID     __DATE__ "" __TIME__
 #define MQTT_TOPIC_SUB     "stress/test"
 #define MQTT_TOPIC_PUB     "stress/data"
 #define MQTT_PUB_INTERVAL  1000   /* ms between publishes */
@@ -48,8 +48,8 @@ LOG_MODULE_REGISTER(eth_stress, LOG_LEVEL_INF);
 
 /* Buffer sizes */
 #define HTTP_RECV_BUF_SIZE 512
-#define MQTT_RX_BUF_SIZE   256
-#define MQTT_TX_BUF_SIZE   256
+#define MQTT_RX_BUF_SIZE   4096
+#define MQTT_TX_BUF_SIZE   512
 
 /* ========================================================================== */
 /*  Global Variables                                                          */
