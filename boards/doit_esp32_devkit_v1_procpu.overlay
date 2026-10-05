@@ -1,0 +1,22 @@
+/* doit_esp32_devkit_v1/esp32/procpu */
+
+/ {
+	aliases {
+		ethernet0 = &ethernet;
+    };
+};
+
+&spi3 {
+	clock-frequency = <DT_FREQ_M(1)>;
+	cs-gpios = <&gpio0 5 GPIO_ACTIVE_LOW>;
+
+	ethernet: enc28j60@0 {
+		compatible = "microchip,enc28j60";
+		label = "enc28j60";
+		reg = <0x0>;
+		spi-max-frequency = <DT_FREQ_M(1)>;
+		int-gpios = <&gpio0 21 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		local-mac-address = [02 00 00 01 02 03];
+		status = "okay";
+	};
+};
