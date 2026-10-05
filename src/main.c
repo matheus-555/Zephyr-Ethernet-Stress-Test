@@ -265,11 +265,27 @@ static void mqtt_evt_handler(struct mqtt_client *const client,
         break;
 
         case MQTT_EVT_PUBLISH:
-            LOG_INF("MQTT: message received on '%.*s' (%u bytes)",
-                    evt->param.publish.message.topic.topic.size,
-                    evt->param.publish.message.topic.topic.utf8,
-                    evt->param.publish.message.payload.len);
-            /* Acknowledge receipt (QoS 1) */
+            uint32_t len = evt->param.publish.message.payload.len;
+            uint8_t discard[64];
+
+            LOG_INF(
+                "MQTT: message received on '%.*s' (%u bytes)",
+                evt->param.publish.message.topic.topic.size,
+                evt->param.publish.message.topic.topic.utf8,
+                len
+            );
+
+            uint32_t remaining = len;
+            while (remaining > 0) {
+                int n = mqtt_read_publish_payload(client, discard,
+                                                MIN(sizeof(discard), remaining));
+                if (n < 0) {
+                    LOG_ERR("MQTT: failed to read payload (%d)", n);
+                    break;
+                }
+                remaining -= n;
+            }
+
             if (evt->param.publish.message.topic.qos == MQTT_QOS_1_AT_LEAST_ONCE) {
                 mqtt_publish_qos1_ack(client, &evt->param.puback);
             }
@@ -353,16 +369,20 @@ void mqtt_thread(void *p1, void *p2, void *p3)
             }
         }
 
-        /* Process MQTT events (poll) */
         struct pollfd fds[1] = {
-            { .fd = mqtt_client.transport.tcp.sock,
-              .events = ZSOCK_POLLIN }
+            [0] = {
+                .fd = mqtt_client.transport.tcp.sock,
+                .events = ZSOCK_POLLIN 
+            }
         };
         int poll_ret = zsock_poll(fds, 1, MQTT_SUB_INTERVAL);
-        if (poll_ret > 0 && (fds[0].revents & ZSOCK_POLLIN)) {
-            mqtt_input(&mqtt_client);
-        } else if (poll_ret < 0) {
+        if (poll_ret < 0) {
             LOG_ERR("MQTT: poll error (%d)", -errno);
+        } else if (poll_ret > 0 && (fds[0].revents & ZSOCK_POLLIN)) {
+            int irc = mqtt_input(&mqtt_client);
+            if (irc != 0 && irc != -EAGAIN) {
+                LOG_ERR("MQTT: mqtt_input error (%d)", irc);
+            }
         }
 
         /* Publish a message periodically */
