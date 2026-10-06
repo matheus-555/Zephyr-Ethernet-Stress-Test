@@ -50,12 +50,25 @@ LOG_MODULE_REGISTER(eth_stress, LOG_LEVEL_INF);
 #define HTTP_RECV_BUF_SIZE 512
 #define MQTT_RX_BUF_SIZE   4096
 #define MQTT_TX_BUF_SIZE   512
+#define MQTT_MSGQ_DEPTH     8
+
+enum mqtt_internal_evt {
+    MQTT_INTERNAL_EVT_PUBLISH,
+    MQTT_INTERNAL_EVT_PUBREC,
+    MQTT_INTERNAL_EVT_LEN,
+};
+
+struct mqtt_internal_msg {
+    enum mqtt_internal_evt type;
+    struct mqtt_evt evt;
+};
 
 /* ========================================================================== */
 /*  Global Variables                                                          */
 /* ========================================================================== */
 
 static K_SEM_DEFINE(net_ready, 0, 1);
+static K_MUTEX_DEFINE(mqtt_mutex);
 static struct net_mgmt_event_callback net_mgmt_cb;
 static struct net_mgmt_event_callback ethernet_mgmt_cb;
 
@@ -65,6 +78,9 @@ static uint8_t mqtt_rx_buffer[MQTT_RX_BUF_SIZE];
 static uint8_t mqtt_tx_buffer[MQTT_TX_BUF_SIZE];
 static bool mqtt_connected = false;
 static char mqtt_client_id[64];
+static struct mqtt_internal_msg mqtt_msgq_buf[MQTT_MSGQ_DEPTH];
+static struct k_msgq mqtt_msgq;
+static uint8_t mqtt_discard_buf[128];
 
 /* ========================================================================== */
 /*  Network event callback                                                    */
@@ -233,74 +249,61 @@ K_THREAD_DEFINE(
 /*  MQTT Thread                                                               */
 /* ========================================================================== */
 
-static void mqtt_evt_handler(struct mqtt_client *const client,
-                             const struct mqtt_evt *evt)
+static void mqtt_work_publish(struct mqtt_client *client,
+                              const struct mqtt_evt *evt)
 {
-    switch (evt->type) {
-        case MQTT_EVT_CONNACK:
-            if (evt->result != 0) {
-                LOG_ERR("MQTT: connection refused (%d)", evt->result);
-                return;
-            }
-            LOG_INF("MQTT: connected to broker");
-            mqtt_connected = true;
+    uint32_t len = evt->param.publish.message.payload.len;
 
-            /* Subscribe to the topic */
-            {
-                struct mqtt_topic sub_topic = {
-                    .topic.utf8 = MQTT_TOPIC_SUB,
-                    .topic.size = strlen(MQTT_TOPIC_SUB),
-                };
-                struct mqtt_subscription_list sub_list = {
-                    .list = &sub_topic,
-                    .list_count = 1,
-                    .message_id = 1,
-                };
-                int rc = mqtt_subscribe(client, &sub_list);
-                if (rc != 0) {
-                    LOG_ERR("MQTT: failed to subscribe (%d)", rc);
-                } else {
-                    LOG_INF("MQTT: subscribed to '%s'", MQTT_TOPIC_SUB);
-                }
-            }
-        break;
+    LOG_INF(
+        "MQTT: message on '%.*s' (%u bytes)",
+        evt->param.publish.message.topic.topic.size,
+        evt->param.publish.message.topic.topic.utf8,
+        len
+    );
 
-        case MQTT_EVT_PUBLISH:
-            uint32_t len = evt->param.publish.message.payload.len;
-            uint8_t discard[64];
-
-            LOG_INF(
-                "MQTT: message received on '%.*s' (%u bytes)",
-                evt->param.publish.message.topic.topic.size,
-                evt->param.publish.message.topic.topic.utf8,
-                len
-            );
-
-            uint32_t remaining = len;
-            while (remaining > 0) {
-                int n = mqtt_read_publish_payload(client, discard,
-                                                MIN(sizeof(discard), remaining));
-                if (n < 0) {
-                    LOG_ERR("MQTT: failed to read payload (%d)", n);
-                    break;
-                }
-                remaining -= n;
-            }
-
-            if (evt->param.publish.message.topic.qos == MQTT_QOS_1_AT_LEAST_ONCE) {
-                mqtt_publish_qos1_ack(client, &evt->param.puback);
-            }
-        break;
-
-        case MQTT_EVT_DISCONNECT:
-            LOG_WRN("MQTT: disconnected from broker");
+    uint32_t remaining = len;
+    while (remaining > 0) {
+        int n = mqtt_read_publish_payload(client, mqtt_discard_buf,
+                                          MIN(sizeof(mqtt_discard_buf),
+                                              remaining));
+        if (n == -EAGAIN) {
+            k_yield();
+            continue;
+        }
+        if (n <= 0) {
+            LOG_ERR("MQTT: payload read failed (%d)", n);
+            mqtt_abort(client);
             mqtt_connected = false;
-        break;
+            return;
+        }
+        remaining -= n;
+    }
 
-        default:
-        break;
+    if (evt->param.publish.message.topic.qos == MQTT_QOS_1_AT_LEAST_ONCE) {
+        struct mqtt_puback_param puback = {
+            .message_id = evt->param.publish.message_id,
+        };
+        (void)mqtt_publish_qos1_ack(client, &puback);
     }
 }
+
+static void mqtt_work_pubrec(struct mqtt_client *client,
+                             const struct mqtt_evt *evt)
+{
+    struct mqtt_pubrel_param rel = {
+        .message_id = evt->param.pubrec.message_id,
+    };
+    int err = mqtt_publish_qos2_release(client, &rel);
+    if (err != 0) {
+        LOG_ERR("MQTT: PUBREL failed (%d)", err);
+    }
+}
+
+static void (*const mqtt_work_handlers[MQTT_INTERNAL_EVT_LEN])(
+    struct mqtt_client *, const struct mqtt_evt *) = {
+    [MQTT_INTERNAL_EVT_PUBLISH] = mqtt_work_publish,
+    [MQTT_INTERNAL_EVT_PUBREC]  = mqtt_work_pubrec,
+};
 
 static void build_client_id(char *buff_client_id, size_t buff_len)
 {
@@ -320,9 +323,96 @@ static void build_client_id(char *buff_client_id, size_t buff_len)
     buff_client_id[i] = '\0';
 }
 
+static void mqtt_evt_handler(struct mqtt_client *const client,
+                             const struct mqtt_evt *evt)
+{
+    struct mqtt_internal_msg msg;
+
+    switch (evt->type) {
+        case MQTT_EVT_CONNACK:
+            if (evt->result != 0) {
+                LOG_ERR("MQTT: CONNACK error %d", evt->result);
+                return;
+            }
+            LOG_INF("MQTT: connected to broker");
+            mqtt_connected = true;
+
+            /* Subscribe to the topic */
+            struct mqtt_topic sub_topic = {
+                .topic.utf8 = MQTT_TOPIC_SUB,
+                .topic.size = strlen(MQTT_TOPIC_SUB),
+            };
+            struct mqtt_subscription_list sub_list = {
+                .list = &sub_topic,
+                .list_count = 1,
+                .message_id = 1,
+            };
+            int rc = mqtt_subscribe(client, &sub_list);
+            if (rc != 0) {
+                LOG_ERR("MQTT: subscribe failed (%d)", rc);
+            } else {
+                LOG_INF("MQTT: subscribed to '%s'", MQTT_TOPIC_SUB);
+            }
+        break;
+
+        case MQTT_EVT_PUBLISH:
+            msg.type = MQTT_INTERNAL_EVT_PUBLISH;
+            memcpy(&msg.evt, evt, sizeof(struct mqtt_evt));
+            if (k_msgq_put(&mqtt_msgq, &msg, K_NO_WAIT) != 0) {
+                LOG_WRN("MQTT: msgq full, dropping PUBLISH");
+            }
+        break;
+
+        case MQTT_EVT_PUBREC:
+            msg.type = MQTT_INTERNAL_EVT_PUBREC;
+            memcpy(&msg.evt, evt, sizeof(struct mqtt_evt));
+            if (k_msgq_put(&mqtt_msgq, &msg, K_NO_WAIT) != 0) {
+                LOG_WRN("MQTT: msgq full, dropping PUBREC");
+            }
+        break;
+
+        case MQTT_EVT_PUBACK:
+            LOG_DBG("MQTT: PUBACK id=%u", evt->param.puback.message_id);
+        break;
+
+        case MQTT_EVT_PUBCOMP:
+            LOG_DBG("MQTT: PUBCOMP id=%u", evt->param.pubcomp.message_id);
+        break;
+
+        case MQTT_EVT_SUBACK:
+            LOG_INF("MQTT: SUBACK id=%u result=%d",
+                    evt->param.suback.message_id, evt->result);
+        break;
+
+        case MQTT_EVT_DISCONNECT:
+            LOG_WRN("MQTT: disconnected (%d)", evt->result);
+            mqtt_connected = false;
+
+            struct mqtt_internal_msg drop;
+            while (k_msgq_get(&mqtt_msgq, &drop, K_NO_WAIT) == 0) {
+            }
+        break;
+
+        case MQTT_EVT_PINGRESP:
+            LOG_DBG("MQTT: PINGRESP");
+        break;
+
+        default:
+            LOG_DBG("MQTT: unhandled evt %d", evt->type);
+        break;
+    }
+}
+
 static int mqtt_connect_broker(void)
 {
-    int ret;
+    int ret = 0;
+
+    k_mutex_lock(&mqtt_mutex, K_FOREVER);
+
+    if (mqtt_connected) {
+        goto end;
+    }
+
     struct zsock_addrinfo hints = {
         .ai_family   = AF_INET,
         .ai_socktype = SOCK_STREAM,
@@ -337,7 +427,8 @@ static int mqtt_connect_broker(void)
     ret = zsock_getaddrinfo(MQTT_BROKER_HOST, port_str, &hints, &res);
     if (ret != 0 || res == NULL) {
         LOG_ERR("MQTT: failed to resolve '%s' (%d)", MQTT_BROKER_HOST, ret);
-        return -EHOSTUNREACH;
+        ret = -EHOSTUNREACH;
+        goto end;
     }
 
     /* Copy the resolved address into the global sockaddr_storage */
@@ -363,56 +454,162 @@ static int mqtt_connect_broker(void)
     ret = mqtt_connect(&mqtt_client);
     if (ret != 0) {
         LOG_ERR("MQTT: connection failed (%d)", ret);
-        return ret;
+        goto end;
     }
 
-    LOG_INF("MQTT: resolved '%s' -> connecting...", MQTT_BROKER_HOST);
-    return 0;
+    struct pollfd fds[1] = {
+        [0] = {
+            .fd = mqtt_client.transport.tcp.sock,
+            .events = ZSOCK_POLLIN,
+        }
+    };
+
+    int poll_ret = zsock_poll(fds, 1, 5000);
+    if (poll_ret <= 0) {
+        LOG_ERR("MQTT: CONNACK timeout (%d)", poll_ret);
+        mqtt_abort(&mqtt_client);
+        ret = -ETIMEDOUT;
+        goto end;
+    }
+
+    ret = mqtt_input(&mqtt_client);
+    if (ret != 0 && ret != -EAGAIN) {
+        LOG_ERR("MQTT: mqtt_input failed (%d)", ret);
+        mqtt_abort(&mqtt_client);
+        goto end;
+    }
+
+    if (!mqtt_connected) {
+        LOG_ERR("MQTT: not connected after CONNACK");
+        mqtt_abort(&mqtt_client);
+        ret = -EIO;
+        goto end;
+    }
+
+    LOG_INF("MQTT: resolved '%s' -> connected", MQTT_BROKER_HOST);
+
+    end:
+    k_mutex_unlock(&mqtt_mutex);
+    return ret;
 }
 
-void mqtt_thread(void *p1, void *p2, void *p3)
+
+static void mqtt_rx_thread(void *p1, void *p2, void *p3)
 {
     ARG_UNUSED(p1);
     ARG_UNUSED(p2);
     ARG_UNUSED(p3);
 
-    /* Wait for the network to be ready */
     k_sem_take(&net_ready, K_FOREVER);
-    LOG_INF("MQTT: thread started");
+    LOG_INF("MQTT RX: thread started");
 
-    /* MQTT main loop */
     while (1) {
+        /* If disconnected, connects (synchronous call, returns only upon CONNACK) */
         if (!mqtt_connected) {
             if (mqtt_connect_broker() != 0) {
-                LOG_WRN("MQTT: retrying in 5s...");
+                LOG_WRN("MQTT RX: retrying in 5s...");
                 k_sleep(K_SECONDS(5));
                 continue;
             }
+            LOG_INF("MQTT RX: session established");
         }
+
+        /* Capture socket and timeout under the mutex */
+        k_mutex_lock(&mqtt_mutex, K_FOREVER);
+
+        if (!mqtt_connected) {
+            k_mutex_unlock(&mqtt_mutex);
+            continue;
+        }
+
+        int sock = mqtt_client.transport.tcp.sock;
+        int timeout = mqtt_keepalive_time_left(&mqtt_client);
+        if (timeout < 0) {
+            timeout = 0;
+        }
+        if (timeout > 200) {
+            timeout = 200;  /* Cap to react quickly to external events */
+        }
+
+        k_mutex_unlock(&mqtt_mutex);
 
         struct pollfd fds[1] = {
             [0] = {
-                .fd = mqtt_client.transport.tcp.sock,
-                .events = ZSOCK_POLLIN 
+                .fd = sock,
+                .events = ZSOCK_POLLIN,
             }
         };
-        int poll_ret = zsock_poll(fds, 1, MQTT_SUB_INTERVAL);
+
+        int poll_ret = zsock_poll(fds, 1, timeout);
+
         if (poll_ret < 0) {
-            LOG_ERR("MQTT: poll error (%d)", -errno);
-        } else if (poll_ret > 0 && (fds[0].revents & ZSOCK_POLLIN)) {
-            int irc = mqtt_input(&mqtt_client);
-            if (irc != 0 && irc != -EAGAIN) {
-                LOG_ERR("MQTT: mqtt_input error (%d)", irc);
+            LOG_ERR("MQTT RX: poll error (%d)", -errno);
+            k_mutex_lock(&mqtt_mutex, K_FOREVER);
+            mqtt_connected = false;
+            k_mutex_unlock(&mqtt_mutex);
+            continue;
+        }
+
+        /* Only process if something arrived. If the timeout expired, go back to the loop. */
+        if (poll_ret == 0 || !(fds[0].revents & ZSOCK_POLLIN)) {
+            continue;
+        }
+
+        k_mutex_lock(&mqtt_mutex, K_FOREVER);
+
+        if (mqtt_connected) {
+            int rc = mqtt_input(&mqtt_client);
+            if (rc != 0 && rc != -EAGAIN) {
+                LOG_ERR("MQTT RX: mqtt_input error (%d)", rc);
+                mqtt_connected = false;
+            } else {
+                /* Drain events queued by the callback.
+                 * Must run here because mqtt_read_publish_payload()
+                 * can only be called from the same thread as mqtt_input(). 
+                 */
+                struct mqtt_internal_msg msg;
+                while (k_msgq_get(&mqtt_msgq, &msg, K_NO_WAIT) == 0) {
+                    mqtt_work_handlers[msg.type](&mqtt_client, &msg.evt);
+                }
             }
         }
 
-        /* Publish a message periodically */
+        k_mutex_unlock(&mqtt_mutex);
+    }
+}
+
+K_THREAD_DEFINE(
+    mqtt_rx_tid, 4096,
+    mqtt_rx_thread, NULL, NULL, NULL,
+    5, 0, 0
+);
+
+static void mqtt_tx_thread(void *p1, void *p2, void *p3)
+{
+    ARG_UNUSED(p1);
+    ARG_UNUSED(p2);
+    ARG_UNUSED(p3);
+
+    k_sem_take(&net_ready, K_FOREVER);
+    LOG_INF("MQTT TX: thread started");
+
+    while (1) {
+        k_mutex_lock(&mqtt_mutex, K_FOREVER);
+
         if (mqtt_connected) {
+            /* Sends PINGREQ, pending PUBACKs, retransmissions */
+            int lrc = mqtt_live(&mqtt_client);
+            if (lrc != 0 && lrc != -EAGAIN) {
+                LOG_ERR("MQTT TX: mqtt_live error (%d)", lrc);
+                mqtt_connected = false;
+                k_mutex_unlock(&mqtt_mutex);
+                k_sleep(K_SECONDS(1));
+                continue;
+            }
+
             char payload[64];
-            snprintk(
-                payload, sizeof(payload),
-                "stress-%u", sys_rand32_get() % 10000
-            );
+            snprintk(payload, sizeof(payload),
+                     "stress-%u", sys_rand32_get() % 10000);
 
             struct mqtt_publish_param pub = {
                 .message.topic = {
@@ -420,28 +617,29 @@ void mqtt_thread(void *p1, void *p2, void *p3)
                     .topic.size = strlen(MQTT_TOPIC_PUB),
                 },
                 .message.payload.data = (uint8_t *)payload,
-                .message.payload.len = strlen(payload),
-                .message.topic.qos = MQTT_QOS_1_AT_LEAST_ONCE,
-                .message_id = sys_rand32_get() % 65535,
-                .retain_flag = 0,
+                .message.payload.len  = strlen(payload),
+                .message.topic.qos    = MQTT_QOS_1_AT_LEAST_ONCE,
+                .message_id           = sys_rand32_get() % 65535,
+                .retain_flag          = 0,
             };
 
-            int rc = mqtt_publish(&mqtt_client, &pub);
-            if (rc == 0) {
-                LOG_INF("MQTT: published '%s' to '%s'",
-                        payload, MQTT_TOPIC_PUB);
+            int prc = mqtt_publish(&mqtt_client, &pub);
+            if (prc == 0) {
+                LOG_INF("MQTT TX: published '%s'", payload);
             } else {
-                LOG_ERR("MQTT: publish failed (%d)", rc);
+                LOG_ERR("MQTT TX: publish failed (%d)", prc);
             }
         }
+
+        k_mutex_unlock(&mqtt_mutex);
 
         k_sleep(K_MSEC(MQTT_PUB_INTERVAL));
     }
 }
 
 K_THREAD_DEFINE(
-    mqtt_tid, 4096,
-    mqtt_thread, NULL, NULL, NULL,
+    mqtt_tx_tid, 4096,
+    mqtt_tx_thread, NULL, NULL, NULL,
     5, 0, 0
 );
 
@@ -454,6 +652,9 @@ int main(void)
     struct net_if *iface;
 
     LOG_INF("=== Zephyr Ethernet Stress Test ===");
+
+    k_msgq_init(&mqtt_msgq, (char *)mqtt_msgq_buf,
+            sizeof(struct mqtt_internal_msg), MQTT_MSGQ_DEPTH);
 
     /* Get the default network interface */
     iface = net_if_get_default();
