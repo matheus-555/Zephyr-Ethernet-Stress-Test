@@ -1,11 +1,5 @@
 /* rpi_pico/rp2040/w */
 
-/ {
-    aliases {
-        ethernet0 = &ethernet;
-    };
-};
-
 &spi0 {
     pinctrl-0 = <&spi0_default>;
 	pinctrl-names = "default";
@@ -13,7 +7,7 @@
 	cs-gpios = <&gpio0 17 GPIO_ACTIVE_LOW>;
     status = "okay";
 
-    ethernet: w5500@0 {
+    ethernet0: w5500@0 {
 		compatible = "wiznet,w5500";
 		label = "w5500";
 		reg = <0x0>;
@@ -21,6 +15,16 @@
 		int-gpios = <&gpio0 20 GPIO_ACTIVE_LOW>;
 		reset-gpios = <&gpio0 21 GPIO_ACTIVE_LOW>;
 		local-mac-address = [00 00 00 01 02 03];
+		status = "disabled";
+	};
+
+	ethernet1: enc28j60@1 {
+		compatible = "microchip,enc28j60";
+		label = "enc28j60";
+		reg = <0x0>;
+		spi-max-frequency = <DT_FREQ_M(10)>;
+		int-gpios = <&gpio0 20 GPIO_ACTIVE_LOW>;
+		local-mac-address = [02 00 00 01 02 03];
 		status = "okay";
 	};
 };
