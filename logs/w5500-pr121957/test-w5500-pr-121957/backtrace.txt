@@ -1,0 +1,13 @@
+xtensa-espressif_esp32_zephyr-elf-addr2line.exe -pfiC -e .\build\zephyr\zephyr.elf 0x400f344c
+net_buf_simple_tailroom at C:/Users/Admin/zephyrproject/zephyr/include/zephyr/net_buf.h:936 (discriminator 1)
+ (inlined by) net_buf_tailroom at C:/Users/Admin/zephyrproject/zephyr/include/zephyr/net_buf.h:2690 (discriminator 1)
+ (inlined by) wiznet_rx at C:/Users/Admin/zephyrproject/zephyr/drivers/ethernet/wiznet/eth_wiznet.c:219 (discriminator 1)
+
+
+
+xtensa-espressif_esp32_zephyr-elf\bin\xtensa-espressif_esp32_zephyr-elf-addr2line.exe -pfiC -e .\build\zephyr\zephyr.elf 0x400f3449:0x3ffeecd0 0x400f3540:0x3ffeed20 0x400f358c:0x3ffeed50 0x400d3939:0x3ffeed80
+wiznet_rx at C:/Users/Admin/zephyrproject/zephyr/drivers/ethernet/wiznet/eth_wiznet.c:210
+wiznet_check_for_ir at C:/Users/Admin/zephyrproject/zephyr/drivers/ethernet/wiznet/eth_wiznet.c:273 (discriminator 1)
+wiznet_thread_interrupt at C:/Users/Admin/zephyrproject/zephyr/drivers/ethernet/wiznet/eth_wiznet.c:316
+ (inlined by) wiznet_thread at C:/Users/Admin/zephyrproject/zephyr/drivers/ethernet/wiznet/eth_wiznet.c:341
+z_thread_entry at C:/Users/Admin/zephyrproject/zephyr/kernel/sys/thread_entry.c:60
