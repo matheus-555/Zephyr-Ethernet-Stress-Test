@@ -652,6 +652,8 @@ int main(void)
     struct net_if *iface;
 
     LOG_INF("=== Zephyr Ethernet Stress Test ===");
+    LOG_INF("CONFIG_BOARD: %s", CONFIG_BOARD);
+    LOG_INF("CONFIG_BOARD_TARGET: %s", CONFIG_BOARD_TARGET);
 
     k_msgq_init(&mqtt_msgq, (char *)mqtt_msgq_buf,
             sizeof(struct mqtt_internal_msg), MQTT_MSGQ_DEPTH);

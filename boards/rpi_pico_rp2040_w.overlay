@@ -14,8 +14,8 @@
 		spi-max-frequency = <DT_FREQ_M(10)>;
 		int-gpios = <&gpio0 20 GPIO_ACTIVE_LOW>;
 		reset-gpios = <&gpio0 21 GPIO_ACTIVE_LOW>;
-		local-mac-address = [00 00 00 01 02 03];
-		status = "disabled";
+		local-mac-address = [02 00 00 01 02 03];
+		status = "okay";
 	};
 
 	ethernet1: enc28j60@1 {
@@ -25,6 +25,6 @@
 		spi-max-frequency = <DT_FREQ_M(10)>;
 		int-gpios = <&gpio0 20 GPIO_ACTIVE_LOW>;
 		local-mac-address = [02 00 00 01 02 03];
-		status = "okay";
+		status = "disabled";
 	};
 };
