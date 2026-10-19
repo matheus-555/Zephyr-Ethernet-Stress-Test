@@ -1,0 +1,1 @@
+Testing #PR121537 on the W5500 in interrupt mode using the Raspberry Pi Pico W (rpi_pico_w) board.
