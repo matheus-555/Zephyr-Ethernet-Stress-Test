@@ -1,0 +1,1 @@
+While testing the ESP32 in polling mode, resetting the device using only update_link_status did not recover it after a header_invalid_size error.
